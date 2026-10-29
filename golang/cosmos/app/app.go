@@ -138,6 +138,11 @@ import (
 	packetforward "github.com/cosmos/ibc-apps/middleware/packet-forward-middleware/v10/packetforward"
 	packetforwardkeeper "github.com/cosmos/ibc-apps/middleware/packet-forward-middleware/v10/packetforward/keeper"
 	packetforwardtypes "github.com/cosmos/ibc-apps/middleware/packet-forward-middleware/v10/packetforward/types"
+
+	// Import the Noble USDC migration module and middleware
+	usdcmigration "github.com/disperze/usdc-migration/v10/x/usdcmigration"
+	usdcmigrationkeeper "github.com/disperze/usdc-migration/v10/x/usdcmigration/keeper"
+	usdcmigrationtypes "github.com/disperze/usdc-migration/v10/x/usdcmigration/types"
 	// unnamed import of statik for swagger UI support
 	// XXX figure out how to build the docs
 	// _ "github.com/cosmos/cosmos-sdk/client/docs/statik"
@@ -236,6 +241,7 @@ type GaiaApp struct { // nolint: golint
 	IBCKeeper           *ibckeeper.Keeper
 	ICAHostKeeper       icahostkeeper.Keeper
 	PacketForwardKeeper *packetforwardkeeper.Keeper
+	UsdcMigrationKeeper *usdcmigrationkeeper.Keeper
 	EvidenceKeeper      evidencekeeper.Keeper
 	TransferKeeper      ibctransferkeeper.Keeper
 	FeeGrantKeeper      feegrantkeeper.Keeper
@@ -350,6 +356,7 @@ func NewAgoricApp(
 		minttypes.StoreKey, distrtypes.StoreKey, slashingtypes.StoreKey,
 		govtypes.StoreKey, paramstypes.StoreKey, ibcexported.StoreKey, upgradetypes.StoreKey,
 		evidencetypes.StoreKey, ibctransfertypes.StoreKey, packetforwardtypes.StoreKey,
+		usdcmigrationtypes.StoreKey,
 		feegrant.StoreKey, authzkeeper.StoreKey, icahosttypes.StoreKey,
 		swingset.StoreKey, vstorage.StoreKey, vibc.StoreKey,
 		vlocalchain.StoreKey, vtransfer.StoreKey, vbank.StoreKey, consensusparamstypes.StoreKey,
@@ -644,11 +651,25 @@ func NewAgoricApp(
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 
+	// The USDC migration keeper must be initialized before the Transfer Keeper.
+	// It wraps the PFM ICS4Wrapper to block outgoing transfers of the Noble USDC
+	// voucher, and sends MsgReturnToNoble packets through PFM as well.
+	app.UsdcMigrationKeeper = usdcmigrationkeeper.NewKeeper(
+		appCodec,
+		runtime.NewKVStoreService(keys[usdcmigrationtypes.StoreKey]),
+		app.PacketForwardKeeper,
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+	)
+
+	// Never call app.TransferKeeper.WithICS4Wrapper after this point: PFM keeps
+	// a copy of the (value-type) TransferKeeper, which would then skip the
+	// USDC migration send block. Use app.UsdcMigrationKeeper.WithICS4Wrapper
+	// instead.
 	app.TransferKeeper = ibctransferkeeper.NewKeeper(
 		appCodec,
 		runtime.NewKVStoreService(keys[ibctransfertypes.StoreKey]),
 		app.GetSubspace(ibctransfertypes.ModuleName),
-		app.PacketForwardKeeper, // Wire in the middleware ICS4Wrapper.
+		app.UsdcMigrationKeeper, // Wire in the middleware ICS4Wrapper.
 		app.IBCKeeper.ChannelKeeper,
 		app.MsgServiceRouter(),
 		app.AccountKeeper,
@@ -683,7 +704,9 @@ func NewAgoricApp(
 
 	// Add an IBC route for ICS-20 fungible token transfers, wrapping base
 	// Cosmos functionality with middleware (from the inside out, Cosmos
-	// packet-forwarding and then our own "vtransfer").
+	// packet-forwarding, then our own "vtransfer", and finally the Noble USDC
+	// migration, which must be outermost to reject incoming Noble USDC and to
+	// intercept acks/timeouts of its own return packets).
 	transferIBCModule := ibctransfer.NewIBCModule(app.TransferKeeper)
 	var ics20TransferStack ibcporttypes.Middleware = packetforward.NewIBCMiddleware(
 		transferIBCModule,
@@ -692,6 +715,7 @@ func NewAgoricApp(
 		packetforwardkeeper.DefaultForwardTransferPacketTimeoutTimestamp, // forward timeout
 	)
 	ics20TransferStack = vtransfer.NewIBCMiddleware(ics20TransferStack, app.VtransferKeeper)
+	ics20TransferStack = usdcmigration.NewIBCMiddleware(app.UsdcMigrationKeeper, ics20TransferStack)
 	ibcRouter.AddRoute(ibctransfertypes.ModuleName, ics20TransferStack)
 
 	// Seal the router
@@ -754,6 +778,7 @@ func NewAgoricApp(
 		ics20TransferModule,
 		icaModule,
 		packetforward.NewAppModule(app.PacketForwardKeeper, app.GetSubspace(packetforwardtypes.ModuleName)),
+		usdcmigration.NewAppModule(app.UsdcMigrationKeeper),
 		vstorage.NewAppModule(app.VstorageKeeper),
 		swingset.NewAppModule(
 			app.SwingSetKeeper,
@@ -878,6 +903,7 @@ func NewAgoricApp(
 		minttypes.ModuleName,
 		ibctransfertypes.ModuleName,
 		packetforwardtypes.ModuleName,
+		usdcmigrationtypes.ModuleName,
 		ibcexported.ModuleName,
 		ibcsolo.ModuleName,
 		ibctm.ModuleName,
@@ -962,7 +988,9 @@ func NewAgoricApp(
 	// another, which shouldn't re-run store upgrades.
 	if isPrimaryUpgradeName(upgradeInfo.Name) && !app.UpgradeKeeper.IsSkipHeight(upgradeInfo.Height) {
 		storeUpgrades := storetypes.StoreUpgrades{
-			Added:   []string{},
+			Added: []string{
+				usdcmigrationtypes.StoreKey,
+			},
 			Deleted: []string{},
 		}
 

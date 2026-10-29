@@ -38,6 +38,7 @@ require (
 	github.com/cosmos/ibc-apps/middleware/packet-forward-middleware/v10 v10.1.0
 	github.com/cosmos/ibc-go/v10 v10.5.0
 	github.com/cosmos/rosetta v0.50.12
+	github.com/disperze/usdc-migration/v10 v10.0.0
 	github.com/golang/protobuf v1.5.4
 	github.com/gorilla/mux v1.8.1
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0

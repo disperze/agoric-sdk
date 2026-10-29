@@ -9,6 +9,7 @@ import (
 	swingsetkeeper "github.com/Agoric/agoric-sdk/golang/cosmos/x/swingset/keeper"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
+	usdcmigrationtypes "github.com/disperze/usdc-migration/v10/x/usdcmigration/types"
 
 	upgradetypes "cosmossdk.io/x/upgrade/types"
 	paramstypes "github.com/cosmos/cosmos-sdk/x/params/types"
@@ -202,6 +203,11 @@ func makeUnreleasedUpgradeHandler(app *GaiaApp, targetUpgrade string) upgradetyp
 		// upgradeSwingset.js). Chain selection lives here, cosmos-side.
 		var vatOptionUpdates []vatOptionUpdate
 
+		// usdcMigrationNobleChannels are this chain's ends of its ICS-20
+		// channels to Noble. They are set as the x/usdcmigration params after
+		// the module's (inert) default genesis has run in RunMigrations.
+		var usdcMigrationNobleChannels []string
+
 		// These CoreProposalSteps are not idempotent and should only be executed
 		// as part of the first upgrade using this handler on any given chain.
 		if isFirstTimeUpgradeOfThisVersion(app, ctx) {
@@ -270,6 +276,16 @@ func makeUnreleasedUpgradeHandler(app *GaiaApp, targetUpgrade string) upgradetyp
 					"vatOptionUpdates", vatOptionUpdates,
 				)
 			}
+
+			// Wind down the Noble USDC voucher before Circle pauses USDC on
+			// Noble: block incoming uusdc and outgoing voucher transfers on
+			// these channels, and allow governance to return Noble's escrow
+			// with MsgReturnToNoble.
+			switch ctx.ChainID() {
+			case "agoric-mainfork-1", "agoric-3": // MAINNET
+				// ibc/FE98AAD68F02F03565E9FA39A5E627946699B2B07115889ED812D8BA639576A9
+				usdcMigrationNobleChannels = []string{"channel-62"}
+			}
 		}
 
 		app.upgradeDetails = &upgradeDetails{
@@ -293,6 +309,14 @@ func makeUnreleasedUpgradeHandler(app *GaiaApp, targetUpgrade string) upgradetyp
 		err = m.MigrateParams(ctx)
 		if err != nil {
 			return mvm, err
+		}
+
+		if len(usdcMigrationNobleChannels) > 0 {
+			usdcMigrationParams := usdcmigrationtypes.DefaultParams()
+			usdcMigrationParams.NobleChannels = usdcMigrationNobleChannels
+			if err := app.UsdcMigrationKeeper.SetParams(ctx, usdcMigrationParams); err != nil {
+				return mvm, err
+			}
 		}
 
 		return mvm, nil
